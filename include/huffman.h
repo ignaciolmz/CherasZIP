@@ -1,13 +1,14 @@
 #ifndef HUFFMAN_H
 #define HUFFMAN_H
 
+#include <stdint.h>
 #include "cola.h"
 
 // Estructura del nodo del arbol de Huffman
 typedef struct Nodo 
 {
     char c;
-    int frecuencia;
+    uint64_t frecuencia;
     struct Nodo* izq;
     struct Nodo* der;
 } Nodo;

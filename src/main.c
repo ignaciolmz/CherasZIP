@@ -2,21 +2,37 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
+#include <dirent.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+
 #include "huffman.h"
 #include "cola.h"
+
+typedef struct 
+{
+    unsigned char buffer;
+    int cont;
+    FILE *dest;
+} BitWriter;
 
 // Prototipos locales
 void procesaArgs(int argc, char** argv);
 const char* getExtension(const char* filename);
 const char* deleteExtension(char* filename);
-void encode(FILE *source, FILE *dest, unsigned long *frecuencias, ColaPrioridad *cola, uint64_t *tamOriginal, uint8_t *bitsRelleno);
-void decode(FILE *source, FILE *dest, unsigned long *frecuencias, ColaPrioridad *cola, uint64_t *tamOriginal, uint8_t *bitsRelleno);
+void encode(const char *root, BitWriter *bw, char **codigos);
+void encodeRec(const char *root, BitWriter *bw, char **codigos);
+void decode(FILE *source, ColaPrioridad *cola, uint64_t *frequencias);
+void frecuenciasGlobal(const char *ruta, uint64_t *frecuencias);
+void frecuenciasLocal(const char *ruta, uint64_t *frecuencias);
+void crearDirect(const char *ruta);
+void escribirBit(BitWriter *bw, char bit);
 
 void procesaArgs(int argc, char** argv) 
 {
     if(argc != 3) 
     {
-        fprintf(stderr, "Error: numero de argumentos incorrecto.\n");
+        fprintf(stderr, "[ERROR] Numero de argumentos incorrecto.\n");
         fprintf(stderr, "Uso: %s, <file> <encode/decode>\n", argv[0]);
         exit(1);
     }
@@ -26,13 +42,13 @@ void procesaArgs(int argc, char** argv)
         const char* ext = getExtension(filename);
         if(strcmp(ext, "cheras") != 0)
         {
-            fprintf(stderr, "Error: no es posible decodificar el archivo expecificado.\n");
+            fprintf(stderr, "[ERROR] No es posible decodificar el archivo especificado.\n");
             fprintf(stderr, "CherasZIP esta diseñado para manejar archivos .cheras\n");
             fprintf(stderr, "Si no ha comprimido el archivo con CherasZIP, pruebe con el software original.\n");
             exit(1);
         } 
     } else if (strcmp(argv[2], "encode") != 0) {
-        fprintf(stderr, "Error: modo de uso incorrecto.\n");
+        fprintf(stderr, "[ERROR] Modo de uso incorrecto.\n");
         fprintf(stderr, "Uso: %s, <file> <encode/decode>\n", argv[0]);
         exit(1);
     } 
@@ -49,7 +65,7 @@ const char* deleteExtension(char* filename)
     char* newFilename = (char*) malloc(strlen(filename) + 1);
     if (newFilename == NULL) 
     {
-        fprintf(stderr, "Error: no se pudo asignar memoria para el nuevo nombre de archivo.\n");
+        fprintf(stderr, "[ERROR] No se pudo asignar memoria para el nuevo nombre de archivo.\n");
         exit(1);
     }
     strcpy(newFilename, filename);
@@ -60,253 +76,346 @@ const char* deleteExtension(char* filename)
     }
     return newFilename;
 }
- 
-void encode(FILE *source, FILE *dest, unsigned long *frecuencias, ColaPrioridad *cola, uint64_t *tamOriginal, uint8_t *bitsRelleno) 
+
+// Codifica el archivo especificado utilizando los códigos huffman
+// previamente calculados. Archivo unico.
+void encode(const char *root, BitWriter *bw, char **codigos) 
 {
-    /* Buffer para almacenar los códigos Huffman hasta completar un byte.
-     * Cuando completa, se escribe en dest.
-     * En el espacio que ocupa un único char, podran almacenarse varias
-     * codificaciones de caracteres, dependiendo de la longitud de su codigo Huffman. */
-    unsigned char bufferByte = 0;
-    int contadorBits = 0; // Contador de bits escritos en el buffer.
-    char* codigos[256] = {NULL}; // Vector de cadenas para almacenar codigo Huffman de cada char.
-    char buffer[256]; // Buffer para almacenar temporalmente el codigo de Huffman, segun se va generando.
-    int i, byte;
+    struct stat info;
+    stat(root, &info);
 
-    // Construcción del histograma de frecuencias.
-    while((byte = fgetc(source)) != EOF) 
-    {
-        frecuencias[(unsigned char) byte]++;
-        (*tamOriginal)++;
-    }  
-    // Reinicio del puntero del archivo fuente para lectura posterior.
-    rewind(source); 
+    fputc('F', bw->dest);
+    uint16_t lenNombre = strlen(root);
+    fwrite(&lenNombre, sizeof(uint16_t), 1, bw->dest);
+    fwrite(root, sizeof(char), lenNombre, bw->dest);
+    uint64_t tamArchivo = info.st_size;
+    fwrite(&tamArchivo, sizeof(uint64_t), 1, bw->dest);
 
-    // Creacion de la cola de prioridad a partir de las frecuencias obtenidas.
-    for(i = 0; i < 256; i++) 
+    FILE *archivo = fopen(root, "rb");
+    if (archivo == NULL) 
     {
-        if(frecuencias[i] > 0) 
-        {
-            Nodo* nodo = creaNodo((char) i, frecuencias[i]);
-            inserta(cola, nodo);
-        }
+        fprintf(stderr, "[ERROR] Al abrir el archivo %s para lectura.\n", root);
+        return;
     }
 
-    // Construcción del árbol de Huffman.
-    Nodo* raiz = huffman(cola);
-    // Generación de los códigos de Huffman.
-    codigosHuffman(raiz, 0, codigos, buffer);
-
-    // Escritura de la cabecera del archivo comprimido.
-    // Tamaño del archivo original.
-    fwrite(tamOriginal, sizeof(uint64_t), 1, dest);
-    // Punto de control de bits para guardar los bits de relleno posteirormente.
-    long pos = ftell(dest);
-    uint8_t relleno = 0;
-    fwrite(&relleno, sizeof(uint8_t), 1, dest);
-    // Se escribe la tabla de frecuencias.
-    size_t escritos = fwrite(frecuencias, sizeof(uint32_t), 256, dest);
-    if(escritos != 256) 
+    int byte;
+    printf("[i] Comprimiendo archivo: [%s]\n", root);
+    while ((byte = fgetc(archivo)) != EOF) 
     {
-        fprintf(stderr, "Error: al escribir la tabla de frecuencias en el archivo comprimirdo.\n");
+        char* codHuffman = codigos[(unsigned char) byte];
+        for(int i = 0; codHuffman[i] != '\0'; i++) 
+        {
+            escribirBit(bw, codHuffman[i]);
+        }    
+    }
+
+    if (bw->cont > 0) 
+    {
+        bw->buffer <<= (8 - bw->cont);
+        fputc(bw->buffer, bw->dest);
+        bw->buffer = 0;
+        bw->cont = 0;
+    }
+
+    fclose(archivo);
+}
+ 
+// Codifica todos los archivos en el directorio especificado y sus subdirectorios
+// utilizando los códigos huffman previamente calculados. Directorio completo.
+void encodeRec(const char *root, BitWriter *bw, char **codigos)
+{
+    DIR *dir = opendir(root);
+    if (!dir ) 
+    {
+        fprintf(stderr, "[ERROR] Al intentar abrir el directorio: %s\n", root);
+        return;
+    }
+
+    struct dirent *entrada;
+    struct stat info;
+
+    while ((entrada = readdir(dir)) != NULL) 
+    {
+        if (strcmp(entrada->d_name, ".") == 0 || strcmp(entrada->d_name, "..") == 0) 
+        {
+            continue;
+        }
+
+        char rutaCompleta[1024];
+        snprintf(rutaCompleta, sizeof(rutaCompleta), "%s/%s", root, entrada->d_name);
+
+        stat(rutaCompleta, &info);
+
+        if (S_ISDIR(info.st_mode))
+        {
+            fputc('D', bw->dest); 
+            uint16_t lenNombre = strlen(rutaCompleta);
+            fwrite(&lenNombre, sizeof(uint16_t), 1, bw->dest);
+            fwrite(rutaCompleta, sizeof(char), lenNombre, bw->dest);
+            encodeRec(rutaCompleta, bw, codigos);
+        } else
+        {
+            encode(rutaCompleta, bw, codigos);
+        }
+    }
+    closedir(dir);
+}
+
+void decode(FILE *source, ColaPrioridad *cola, uint64_t *frequencias)
+{
+    size_t leidos = fread(frequencias, sizeof(uint64_t), 256, source);
+    if (leidos != 256) 
+    {
+        fprintf(stderr, "[ERROR] Al leer la tabla de frecuencias del archivo comprimido.\n");
         exit(4);
     }
 
-    // Reiteración sobre los bytes originales.
-    // Sustitución por la representación Huffman correspondiente.
-    while((byte = fgetc(source)) != EOF) 
-    {
-        // Se obtiene el código Huffman del byte leído.
-        char* codHuffman = codigos[(unsigned char) byte];
-        if (!codHuffman) 
-        {
-            fprintf(stderr, "Error: No hay código Huffman para el byte %d\n", byte);
-            exit(5);
-        }
-
-        // Se escribe el código en el buffer.
-        for(i = 0; codHuffman[i] != '\0'; i++) 
-        {
-            // Se añade un bit al buffer (por defecto, un 0).
-            // Se desplaza el buffer a la izquierda, para añadir un nuevo bit.
-            bufferByte <<= 1;
-            if(codHuffman[i] == '1') 
-            {
-                // Se añade un 1 al buffer si corresponde (OR logico).
-                bufferByte |= 1;
-            }
-            contadorBits++;
-            // Completado un byte, se escribe en el archivo destino.
-            if(contadorBits == 8) 
-            {
-                fputc(bufferByte, dest);
-                bufferByte = 0;
-                contadorBits = 0;
-            }
-        }    
-    }    
-    // Si el buffer no se ha completado, completa el byte restante.
-    if(contadorBits > 0) 
-    {
-        bufferByte <<= (8 - contadorBits); 
-        fputc(bufferByte, dest);
-
-        // Guardado del número de bits de relleno.
-        // Recupera el checkpoint previo de la cabecera.
-        *bitsRelleno = 8 - contadorBits;
-        fseek(dest, pos, SEEK_SET); 
-        fwrite(&bitsRelleno, sizeof(uint8_t), 1, dest);
-    }
-
-    // Liberacion de memoria del vector que alberga los codigos de Huffman
-    for (int i = 0; i < 256; ++i) {
-        free(codigos[i]);
-    }
-
-    // Asegura escritura en destino de forma inmediata.
-    fflush(dest); 
-    fclose(dest); 
-    fclose(source); 
-}
-
-void decode(FILE *source, FILE *dest, unsigned long *frecuencias, ColaPrioridad *cola, uint64_t *tamOriginal, uint8_t *bitsRelleno) 
-{
-    int i, byte, bit, bitsLeidos;
-    uint64_t bitsTotales = 0;
-
-    size_t leidos = fread(tamOriginal, sizeof(uint64_t), 1, source);
-    if (leidos != 1) {
-        perror("Error: al intentar leer tamaño del archivo original de los metadatos.\n");
-        exit(6);
-    }
-    bitsTotales = (*tamOriginal) * 8;
-    leidos = fread(bitsRelleno, sizeof(uint8_t), 1, source);
-    if (leidos != 1) {
-        perror("Error: al intentar leer tamaño del archivo original de los metadatos.\n");
-        exit(6);
-    }
-    // Lectura de la tabla de frecuencias de los metadatos
-    leidos = fread(frecuencias, sizeof(uint32_t), 256, source);
-    if (leidos != 256) {
-        fprintf(stderr, "Error: al leer la tabla de frecuencias del archivo comprimido.\n");
-        exit(7);
-    }
-
-    // Recreación de la cola de prioridad a partir de las frecuencias leídas.
-    for(i = 0; i < 256; i++) 
-    {
-        if(frecuencias[i] > 0) 
-        {
-            Nodo* nodo = creaNodo((char) i, frecuencias[i]);
-            inserta(cola, nodo);
-        }
-    }
-
-    // Reconstrucción del árbol de Huffman.
-    // Parte de la raiz
     Nodo* raiz = huffman(cola);
-    Nodo* actual = raiz;
-    bitsLeidos = 0; // Contador auxiliar 
-    // Lectura de los datos comprimidos
-    while((byte = fgetc(source)) != EOF) 
-    {   
-        // Lectura bit a bit
-        for(i = 7; i >= 0; i--) 
-        {  
-            // Aislamiento del bit i-eisimo 
-            bit = (byte >> i) & 1;
-            actual = (bit == 0) ? actual->izq : actual->der;
+    int tag;
+    while ((tag = fgetc(source)) != EOF)
+    {
+        uint16_t lenNombre;
+        fread(&lenNombre, sizeof(uint16_t), 1, source);
 
-            if(actual ->izq == NULL && actual->der == NULL) 
+        char nombreArchivo[1024];
+        fread(nombreArchivo, sizeof(char), lenNombre, source);
+        nombreArchivo[lenNombre] = '\0';
+
+        if (tag == 'D')
+        {
+            printf("[i] Creando directorio: [%s]\n", nombreArchivo);
+            crearDirect(nombreArchivo);
+        } else if (tag == 'F')
+        {
+            uint64_t tamArchivo;
+            fread(&tamArchivo, sizeof(uint64_t), 1, source);
+            printf("[i] Descomprimiendo archivo: [%s] (Tamaño: %llu bytes)\n", 
+                nombreArchivo, (unsigned long) tamArchivo);
+
+            FILE *dest = fopen(nombreArchivo, "wb");
+            if (!dest) 
             {
-                // Llegados a una hoja -> Copiamos el caracter (original)
-                fputc(actual->c, dest);
-                // Vuelta a empezar
-                actual = raiz;
-                
-                // Acabamos
-                // Pueden haber bits de relleno al final como se especifico antes
-                // No hay problema, cuando se detecte se rompe el bucle
-                if(bitsLeidos >= (bitsTotales - *bitsRelleno))
+                fprintf(stderr, "[ERROR] Al crear el archivo %s para escritura.\n", nombreArchivo);
+                continue;
+            }
+
+            Nodo *actual = raiz;
+            uint64_t bytesEscritos = 0;
+            int byteLeido;
+
+            if (tamArchivo > 0)
+            {
+                while (bytesEscritos < tamArchivo && (byteLeido = fgetc(source)) != EOF)
                 {
-                    break;
+                    for (int i = 7; i >= 0; i--)
+                    {
+                        int bit = (byteLeido >> i) & 1;
+                        if (bit == 0) actual = actual->izq;
+                        else actual = actual->der;
+
+                        if (actual->izq == NULL && actual->der == NULL)
+                        {
+                            fputc(actual->c, dest);
+                            bytesEscritos++;
+                            actual = raiz;
+
+                            if (bytesEscritos >= tamArchivo) break;
+                        }
+                    }
                 }
             }
+            fclose(dest);
+        } else
+        {
+            fprintf(stderr, "[ERROR] Etiqueta desconocida en el archivo comprimido.\n");
+            exit(5);
         }
     }
+}
 
-    fflush(dest);
-    fclose(dest);
-    fclose(source);
+void crearDirect(const char *ruta) 
+{
+    #ifdef _WIN32 // Windows
+        _mkdir(ruta);
+    #else // Unix - Linux
+        mkdir(ruta, 0755);
+    #endif
+}
+
+// Construye el histograma de frecuencias de los bytes que componen
+// el archivo fuente (unico) especificado.
+void frecuenciasLocal(const char *ruta, uint64_t *frecuencias) 
+{
+    FILE *archivo = fopen(ruta, "rb");
+    if(archivo == NULL) 
+    {
+        fprintf(stderr, "[ERROR] Al abrir el archivo %s para lectura.\n", ruta);
+        exit(3);
+    }
+
+    int byte;
+    while((byte = fgetc(archivo)) != EOF) 
+    {
+        frecuencias[(unsigned char) byte]++;
+    }  
+    fclose(archivo); 
+}
+
+// Construye el histograma de frecuencias de los bytes que componen
+// todos los archivos en el directorio especificado (y subdirectorios).
+void frecuenciasGlobal(const char *ruta, uint64_t *frecuencias)
+{
+    DIR *dir = opendir(ruta);
+    if (!dir ) 
+    {
+        fprintf(stderr, "[ERROR] Al intentar abrir el directorio: %s\n", ruta);
+        return;
+    }
+
+    struct dirent *entrada;
+    struct stat info;
+
+    while ((entrada = readdir(dir)) != NULL)
+    {
+        if (strcmp(entrada->d_name, ".") == 0 || strcmp(entrada->d_name, "..") == 0) 
+        {
+            continue;
+        }
+
+        char rutaCompleta[1024];
+        snprintf(rutaCompleta, sizeof(rutaCompleta), "%s/%s", ruta, entrada->d_name);
+        stat(rutaCompleta, &info);
+
+        if (!S_ISDIR(info.st_mode)) 
+        {
+            FILE *archivo = fopen(rutaCompleta, "rb");
+            if (archivo == NULL) 
+            {
+                fprintf(stderr, "[ERROR] Al abrir el archivo %s para lectura.\n", rutaCompleta);
+                continue;
+            }
+    
+            int byte;
+            while ((byte = fgetc(archivo)) != EOF) 
+            {
+                frecuencias[(unsigned char) byte]++;
+            }
+            fclose(archivo);
+        } else 
+        {
+            frecuenciasGlobal(rutaCompleta, frecuencias);
+        }
+    }
+}
+
+void escribirBit(BitWriter *bw, char bit) 
+{
+    bw->buffer <<= 1;
+    if (bit == '1') 
+    {
+        bw->buffer |= 1;
+    }
+    bw->cont++;
+
+    if (bw->cont == 8) 
+    {
+        fputc(bw->buffer, bw->dest);
+        bw->buffer = 0;
+        bw->cont = 0;
+    }
 }
 
 int main(int argc, char** argv) 
 {
-    FILE *source, *dest;
     char *filename, *uso;
-    char destname[256]; 
-    unsigned long frecuencias[256] = {0};     
-    uint64_t tamOriginal = 0;
-    uint8_t bitsRelleno = 0;
+    char destname[256];
+    char bufferHuffman[256];
+    char *codigos[256] = {NULL};
+    uint64_t frecuencias[256] = {0};     
     
-    // Procesa los argumentos de la línea de comandos.
     procesaArgs(argc, argv);
-    
-    // Asigna los argumentos a las variables correspondientes.
     filename = argv[1];
     uso = argv[2];
 
-    // Inicializa la cola de prioridad.
     ColaPrioridad *cola;
     cola = (ColaPrioridad*) malloc(sizeof(ColaPrioridad));
     if(cola == NULL) 
     {
-        fprintf(stderr, "Error: al intentar asignar memoria para la cola de prioridad.\n");
+        fprintf(stderr, "[ERROR] Al intentar asignar memoria para la cola de prioridad.\n");
         exit(2);
     }
     init(cola);    
     
     if(strcmp(uso, "encode") == 0) 
     {
-        // Archivo origen (original)
-        source = fopen(filename, "rb");
-        if(source == NULL)
+        struct stat info;
+        stat(filename, &info);
+
+        if (S_ISDIR(info.st_mode)) 
         {
-            fprintf(stderr, "Error: al abrir el archivo %s para lectura.\n", filename);
-            exit(3);
+            printf("[i] Construyendo tabla de frecuencias para el directorio [%s]...\n", filename);
+            frecuenciasGlobal(filename, frecuencias);
+        } else 
+        {
+            printf("[i] Construyendo tabla de frecuencias para el archivo [%s]...\n", filename);
+            frecuenciasLocal(filename, frecuencias);
         }
 
-        // Archivo destino (comprimido)
+        for (int i = 0; i < 256; i++) 
+        {
+            if(frecuencias[i] > 0) 
+            {
+                Nodo* nodo = creaNodo((char) i, frecuencias[i]);
+                inserta(cola, nodo);
+            }
+        }
+
+        Nodo* raiz = huffman(cola);
+        codigosHuffman(raiz, 0, codigos, bufferHuffman);
+
         sprintf(destname, "%s.cheras", filename);
-        dest = fopen(destname, "wb");
-        if(dest == NULL) 
+        FILE *dest = fopen(destname, "wb");
+        if(dest == NULL)
         {
-            fprintf(stderr, "Error: al abrir el archivo %s para escritura.\n", destname);
+            fprintf(stderr, "[ERROR] Al intentar crear y abrir el archivo %s.\n", destname);
             exit(3);
         }
 
-        // Codifica el archivo, comprimiendolo.
-        encode(source, dest, frecuencias, cola, &tamOriginal, &bitsRelleno);
+        fwrite(&frecuencias, sizeof(uint64_t), 256, dest);
+        BitWriter bw = {0, 0, dest};
 
-        // Libera la memoria de la cola de prioridad.
-        liberarCola(cola); 
-    } else {
-        source = fopen(filename, "rb");
-        if(source == NULL)
+        
+        if (S_ISDIR(info.st_mode)) 
         {
-            fprintf(stderr, "Error: al abrrir el archivo %s para lectura.\n", filename);
-            exit(3);
+            printf("[i] Comprimiendo archivos de [%s] en [%s]\n", filename, destname);
+            encodeRec(filename, &bw, codigos);
+        } else 
+        {
+            encode(filename, &bw, codigos);
         }
 
-        // Archivo destino (descomprimido)
-        sprintf(destname, "%s", deleteExtension(filename));
-        dest = fopen(destname, "wb");
+        if (bw.cont > 0) 
+        {
+            bw.buffer <<= (8 - bw.cont);
+            fputc(bw.buffer, bw.dest);
+        }
 
-        // Descodifica el archivo cheras
-        decode(source, dest, frecuencias, cola, &tamOriginal, &bitsRelleno);
-
-        // Libera la memoria de la cola de prioridad.
+        fclose(dest);
         liberarCola(cola);
+        printf("[i] Archivo comprimido correctamente. ¡Gracias por usar CherasZIP!\n");  
+    } else {
+        FILE* source = fopen(filename, "rb");
+        if (source == NULL) 
+        {
+            fprintf(stderr, "[ERROR] Al intentar abrir el archivo %s para lectura.\n", filename);
+            exit(3);
+        }
+
+        decode(source, cola, frecuencias);
+
+        fclose(source);
+        liberarCola(cola);
+        printf("[i] Archivo descomprimido correctamente. ¡Gracias por usar CherasZIP!\n");
     }
 
     return 0; 

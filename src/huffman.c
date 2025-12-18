@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdint.h>
 #include "huffman.h"
 #include "cola.h"
 
@@ -16,7 +17,7 @@ Nodo* huffman(ColaPrioridad *cola)
         nodo1 = extrae(cola);
         nodo2 = extrae(cola);
     
-        int frecNuevo = nodo1->frecuencia + nodo2 -> frecuencia;
+        uint64_t frecNuevo = nodo1->frecuencia + nodo2 -> frecuencia;
         nuevo = creaNodo('\0', frecNuevo);
         nuevo->izq = nodo1;
         nuevo->der = nodo2;  
@@ -30,7 +31,7 @@ Nodo* huffman(ColaPrioridad *cola)
 
 // Crea un nuevo nodo, con un caracrer y frecuencia determinados.
 // Inicialmente, no define sus hijos.
-Nodo* creaNodo(char c, int frec) 
+Nodo* creaNodo(char c, uint64_t frec) 
 {
     // Reserva dinamica para el nodo.
     Nodo *nodo = (Nodo*) malloc(sizeof(Nodo));
