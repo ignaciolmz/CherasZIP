@@ -13,10 +13,10 @@ Obtener el ejecutable CherasZIP.exe del directorio build/.<br>
 Actualmente, su uso se encuentra limitado a plataformas Windows mediante CMD.<br>
 <pre>
   Modo de uso (compresión) - Obtención del archivo comprimido <i>file.extension.cheras</i>
-  >> .\CherasZIP.exe .\file.extension encode
+  >> CherasZIP.exe file.extension encode
   
   Modo de uso (descompresión) - específicamente diseñado para archivos .cheras, propios de CherasZIP.
-  >> .\CherasZIP.exe .\file.extension.cheras decode
+  >> CherasZIP.exe file.extension.cheras decode
 </pre>
 
 ## Características
