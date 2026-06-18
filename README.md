@@ -29,16 +29,16 @@ Actualmente no permite su uso con directorios. Esta implementación se encuentra
 Utiliza exclusivamente Huffman, si bien se plantea como ampliación posterior emplear Deflate (LZ77 + Huffman).<br>
 
 ### Estructura del proyecto
-<pre>
-  CherasZIP
-  - build/
-    |... CherasZIP.exe
-  - include/
-    |... cola.h
-    |... huffman.h
-  - src/
-    |... cola.c
-    |... huffman.c
-    |... main.c
-  - Makefile
-</pre>
+```text
+CherasZIP/
+├── build/
+│   └── CherasZIP.exe
+├── include/
+│   ├── cola.h
+│   └── huffman.h
+├── src/
+│   ├── cola.c
+│   ├── huffman.c
+│   └── main.c
+└── Makefile
+```
